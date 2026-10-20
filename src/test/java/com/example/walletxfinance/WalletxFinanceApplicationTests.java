@@ -20,10 +20,12 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.reactive.function.client.WebClient;
 import static org.junit.jupiter.api.Assertions.*;
 
+@org.springframework.context.annotation.Import(FinanceSchemaTestSupport.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "walletx.introspection.client-secret=integration-test-service-secret-at-least-32-characters",
         "walletx.introspection.read-timeout=1s"})
 class WalletxFinanceApplicationTests {
+    private static final String SCHEMA="finance_test_"+java.util.UUID.randomUUID().toString().replace("-","");
     private static final String USER_ID="b6471184-51a4-4613-9f68-a0c02122cb29";
     private static final AtomicInteger REQUESTS = new AtomicInteger();
     private static final ExecutorService EXECUTOR=Executors.newCachedThreadPool();
@@ -35,6 +37,9 @@ class WalletxFinanceApplicationTests {
 
     @DynamicPropertySource
     static void authEndpoint(DynamicPropertyRegistry registry) {
+        registry.add("test.finance-schema",() -> SCHEMA);
+        registry.add("spring.flyway.schemas",() -> SCHEMA);
+        registry.add("spring.flyway.placeholders.financeSchema",() -> SCHEMA);
         registry.add("walletx.introspection.uri", () -> "http://localhost:"+AUTH.getAddress().getPort()+"/introspect");
     }
 
@@ -72,7 +77,7 @@ class WalletxFinanceApplicationTests {
         } catch(java.io.IOException failure) { throw new ExceptionInInitializerError(failure); }
     }
 
-    @AfterAll static void stopAuthStub() { AUTH.stop(0); EXECUTOR.shutdownNow(); }
+    @AfterAll static void stopAuthStub(@Autowired DataSource dataSource) { AUTH.stop(0); EXECUTOR.shutdownNow(); FinanceSchemaTestSupport.cleanup(dataSource,SCHEMA); }
 
     private HttpResponse<String> get(String path,String token) throws Exception {
         var request=HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).GET();
