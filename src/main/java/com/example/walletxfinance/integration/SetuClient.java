@@ -24,7 +24,7 @@ public class SetuClient {
                 .connectTimeout(Duration.ofSeconds(5)).followRedirects(java.net.http.HttpClient.Redirect.NEVER).build()))
                 .codecs(c -> c.defaultCodecs().maxInMemorySize(8*1024*1024)).build();
     }
-    public JsonNode consent(String id) { return request(HttpMethod.GET,"/v2/consents/"+identifier(id),null); }
+    public JsonNode consent(String id) { return request(HttpMethod.GET,"/v2/consents/"+identifier(id)+"?expanded=true",null); }
     public JsonNode createConsent(Object payload) { return request(HttpMethod.POST,"/v2/consents",payload); }
     public JsonNode revoke(String id) { return request(HttpMethod.POST,"/v2/consents/"+identifier(id)+"/revoke",null); }
     public JsonNode createSession(Object payload) { return request(HttpMethod.POST,"/v2/sessions",payload); }
@@ -43,8 +43,12 @@ public class SetuClient {
                 "clientID",properties.getClientId(),"secret",properties.getClientSecret(),"grant_type","client_credentials"),null,true);
         String value=response.path("access_token").asString("");
         long ttl=response.path("expires_in").asLong(0);
-        if(value.isBlank() || ttl<1) throw new BankIntegrationException(502,"Setu authentication response is incomplete");
-        accessToken=value; tokenExpires=Instant.now().plusSeconds(Math.max(0,ttl-30)); return value;
+        if(value.isBlank()) throw new BankIntegrationException(502,"Setu authentication response has no access token");
+        // Bridge may return access_token and refresh_token without expires_in.
+        // Such tokens can be used for this request, but must not be cached with a guessed lifetime.
+        accessToken=value;
+        tokenExpires=ttl>30 && ttl<=86400 ? Instant.now().plusSeconds(ttl-30) : Instant.EPOCH;
+        return value;
     }
     private JsonNode request(HttpMethod method,String path,Object body) {
         String base=properties.getBaseUrl().toString().replaceAll("/$","");
@@ -58,13 +62,30 @@ public class SetuClient {
             else request.headers(h -> { h.setBearerAuth(bearer); h.set("x-product-instance-id",properties.getProductId()); });
             WebClient.RequestHeadersSpec<?> spec=body==null?request:request.bodyValue(body);
             String raw=spec.retrieve().bodyToMono(String.class).block(Duration.ofSeconds(20));
-            return raw==null || raw.isBlank()?json.createObjectNode():json.readTree(raw);
+            if(raw==null || raw.isBlank()) throw new BankIntegrationException(502,"Setu returned an empty response");
+            JsonNode parsed;
+            try { parsed=json.readTree(raw); }
+            catch(RuntimeException invalid) { throw new BankIntegrationException(502,"Setu returned invalid JSON"); }
+            if(!parsed.isObject()) throw new BankIntegrationException(502,"Setu returned an unexpected response format");
+            return parsed;
         } catch(WebClientResponseException upstream) {
             if(upstream.getStatusCode().value()==401) { synchronized(this) { accessToken=null; tokenExpires=Instant.EPOCH; } }
             // Do not expose upstream bodies, credentials, or bank data in errors/logs.
             throw new BankIntegrationException(upstream.getStatusCode().value()==429?429:502,
-                    "Setu request failed (HTTP "+upstream.getStatusCode().value()+"); check sandbox configuration or retry a safe status request");
+                    "Setu request failed (HTTP "+upstream.getStatusCode().value()+"); check sandbox configuration or retry a safe status request", upstream.getStatusCode().value());
         } catch(BankIntegrationException known) { throw known; }
-        catch(RuntimeException unavailable) { throw new BankIntegrationException(502,"Setu did not return a usable response; check provider status before repeating a create request"); }
+        catch(RuntimeException unavailable) {
+            for(Throwable cause=unavailable;cause!=null;cause=cause.getCause()) {
+                if(cause instanceof java.net.UnknownHostException || cause instanceof java.nio.channels.UnresolvedAddressException)
+                    throw new BankIntegrationException(502,"Cannot resolve the Setu host; check DNS, internet connectivity and the configured Setu URLs");
+                if(cause instanceof javax.net.ssl.SSLException)
+                    throw new BankIntegrationException(502,"TLS connection to Setu failed; check the Java trust store and any proxy or VPN");
+                if(cause instanceof java.util.concurrent.TimeoutException || cause instanceof java.net.http.HttpTimeoutException)
+                    throw new BankIntegrationException(504,"Setu request timed out; refresh the existing resource before repeating a create request");
+                if(cause instanceof java.net.ConnectException)
+                    throw new BankIntegrationException(502,"Cannot connect to Setu; check internet connectivity, firewall and provider availability");
+            }
+            throw new BankIntegrationException(502,"Setu response could not be processed; check provider availability before repeating a create request");
+        }
     }
 }

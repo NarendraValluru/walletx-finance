@@ -33,14 +33,17 @@ public class BankDataIngestion {
         Instant expiry=localSession.getDataExpiresAt();
         if(!expiry.isAfter(now)) throw new BankIntegrationException(409,"Session data retention has expired; request a new data session");
         Set<String> allowed=new HashSet<>();
-        for(JsonNode account:consentData.path("detail").path("accounts")) {
+        JsonNode approvedAccounts=consentData.path("accountsLinked");
+        if(!approvedAccounts.isArray() || approvedAccounts.isEmpty()) approvedAccounts=consentData.path("detail").path("accounts");
+        for(JsonNode account:approvedAccounts) {
             allowed.add(account.path("fipId").asString("")+":"+account.path("linkRefNumber").asString(""));
         }
         String ns=schema();
         for(JsonNode fip:session.path("fips")) {
             String fipId=required(fip,"fipID");
             for(JsonNode item:fip.path("accounts")) {
-                if(!List.of("DELIVERED","READY").contains(item.path("status").asString(""))) continue;
+                String accountStatus=item.path("FIstatus").asString(item.path("status").asString(""));
+                if(!List.of("DELIVERED","READY").contains(accountStatus)) continue;
                 String ref=required(item,"linkRefNumber");
                 if(!allowed.contains(fipId+":"+ref)) throw new BankIntegrationException(502,"Returned account is not in the approved consent");
                 JsonNode account=item.path("data").path("account");

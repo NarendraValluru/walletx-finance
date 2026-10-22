@@ -11,6 +11,6 @@ public final class BankDtos {
  public record ConsentView(UUID id,String status,String approvalUrl,Instant from,Instant to,Instant expiresAt,Instant createdAt) {}
  public record SessionView(UUID id,UUID consentId,String status,int attempts,String failureCode,Instant createdAt) {}
  public record AccountView(UUID id,String fipId,String maskedNumber,String accountType,String currency,Instant lastSynced) {}
- public record TransactionView(UUID id,UUID accountId,String providerTxnId,BigDecimal amount,String direction,Instant occurredAt,String narration,String mode) {}
+ public record TransactionView(UUID id,UUID accountId,String providerTxnId,BigDecimal amount,String direction,Instant occurredAt,String narration,String mode,String currency,String maskedNumber) {}
  public record PageView<T>(List<T> items,long total,int page,int size) {}
 }

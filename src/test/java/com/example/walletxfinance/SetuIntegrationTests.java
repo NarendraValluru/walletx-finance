@@ -33,6 +33,7 @@ class SetuIntegrationTests {
  static final String FROM="2024-01-01T00:00:00Z",TO="2024-02-01T00:00:00Z";
  static final JsonMapper JSON=JsonMapper.builder().build();
  static final Map<String,String> CONSENTS=new ConcurrentHashMap<>(),SESSIONS=new ConcurrentHashMap<>();
+ static final Set<String> REJECT_CREATES=ConcurrentHashMap.newKeySet(),FAILED_SESSIONS=ConcurrentHashMap.newKeySet();
  static final AtomicInteger TOKEN_CALLS=new AtomicInteger(),CREATE_CALLS=new AtomicInteger(),SESSION_CALLS=new AtomicInteger();
  static final ExecutorService EXECUTOR=Executors.newVirtualThreadPerTaskExecutor();
  static final HttpServer STUB=startStub();
@@ -53,7 +54,7 @@ class SetuIntegrationTests {
  }
  static Map<String,Object> detail(String id) {
   return Map.of("consentExpiry",Instant.now().plusSeconds(3600).toString(),"dataLife",Map.of("unit","DAY","value",1),
-   "dataRange",Map.of("from",FROM,"to",TO),"accounts",List.of(Map.of("fipId","mock-bank","linkRefNumber","account-"+id)));
+   "dataRange",Map.of("from",FROM,"to",TO));
  }
  static HttpServer startStub() {
   try {
@@ -68,7 +69,7 @@ class SetuIntegrationTests {
      } else if(path.equals("/token")) {
       var input=JSON.readTree(body);
       if(!"mock-client".equals(input.path("clientID").asString()) || !"mock-secret".equals(input.path("secret").asString()) || !"bridge".equals(x.getRequestHeaders().getFirst("client"))) code=401;
-      else {TOKEN_CALLS.incrementAndGet();response=Map.of("access_token","provider-token","expires_in",3600);}
+      else {TOKEN_CALLS.incrementAndGet();response=Map.of("access_token","provider-token","refresh_token","mock-refresh-token");}
      } else if(!"Bearer provider-token".equals(x.getRequestHeaders().getFirst("Authorization")) || !"mock-product".equals(x.getRequestHeaders().getFirst("x-product-instance-id"))) code=401;
      else if(path.equals("/v2/consents") && method.equals("POST")) {
       CREATE_CALLS.incrementAndGet();String id=UUID.randomUUID().toString();CONSENTS.put(id,"PENDING");
@@ -78,18 +79,19 @@ class SetuIntegrationTests {
       if(!CONSENTS.containsKey(id)) code=404;
       else if(path.endsWith("/revoke")) {CONSENTS.put(id,"REVOKED");response=Map.of();}
       else if("ERROR".equals(CONSENTS.get(id))) {code=503;response=Map.of("secret","do-not-expose-provider-body");}
-      else response=Map.of("id",id,"status",CONSENTS.get(id),"detail",detail(id));
+      else response=Map.of("id",id,"status",CONSENTS.get(id),"detail",detail(id),"accountsLinked",List.of(Map.of("fipId","mock-bank","linkRefNumber","account-"+id)));
      } else if(path.equals("/v2/sessions") && method.equals("POST")) {
-      SESSION_CALLS.incrementAndGet();String id=UUID.randomUUID().toString(),consent=JSON.readTree(body).path("consentId").asString();SESSIONS.put(id,consent);
-      response=Map.of("id",id,"status","PENDING");code=201;
+      SESSION_CALLS.incrementAndGet();String id=UUID.randomUUID().toString(),consent=JSON.readTree(body).path("consentId").asString();
+      if(REJECT_CREATES.contains(consent)) {code=400;response=Map.of("errorMsg","private upstream detail");}
+      else {SESSIONS.put(id,consent);response=Map.of("id",id,"status","PENDING");code=201;}
      } else if(path.startsWith("/v2/sessions/")) {
       String consent=SESSIONS.get(path.split("/")[3]);
       if(consent==null) code=404;
       else {
        var transaction=Map.of("txnId","sample-txn-1","amount","25.50","type","DEBIT","transactionTimestamp","2024-01-10T12:00:00Z","narration","Sample restaurant","mode","UPI");
        var account=Map.of("type","deposit","summary",Map.of("currency","INR","type","SAVINGS"),"transactions",Map.of("transaction",List.of(transaction)));
-       var item=Map.of("linkRefNumber","account-"+consent,"maskedAccNumber","XXXX1234","status","DELIVERED","data",Map.of("account",account));
-       response=Map.of("status","COMPLETED","consentId",consent,"fips",List.of(Map.of("fipID","mock-bank","accounts",List.of(item))));
+       var item=Map.of("linkRefNumber","account-"+consent,"maskedAccNumber","XXXX1234","FIstatus","DELIVERED","data",Map.of("account",account));
+       response=Map.of("status",FAILED_SESSIONS.contains(consent)?"FAILED":"COMPLETED","consentId",consent,"fips",List.of(Map.of("fipID","mock-bank","accounts",List.of(item))));
       }
      } else code=404;
     } catch(RuntimeException failure) {code=500;response=Map.of("error","Mock request invalid");}
@@ -132,10 +134,30 @@ class SetuIntegrationTests {
   assertEquals(retention,jdbc.queryForObject("SELECT data_expires_at FROM \""+SCHEMA+"\".bank_data_sessions WHERE id=?",java.sql.Timestamp.class,UUID.fromString(session)).toInstant());
   var result=call("GET","/api/v1/transactions",null,token,null);var json=JSON.readTree(result.body());
   assertEquals(200,result.statusCode(),result.body());assertEquals(1,json.path("total").asInt());assertEquals(0,new java.math.BigDecimal("25.50").compareTo(new java.math.BigDecimal(json.path("items").path(0).path("amount").asString())));
+  assertEquals("INR",json.path("items").path(0).path("currency").asString());
+  assertEquals("XXXX1234",json.path("items").path(0).path("maskedNumber").asString());
   assertEquals(0,JSON.readTree(call("GET","/api/v1/transactions",null,"user-"+UUID.randomUUID(),null).body()).path("total").asInt());
   assertEquals(200,call("POST","/api/v1/bank-connections/consents/"+id+"/revoke",null,token,null).statusCode());
   assertEquals(0,JSON.readTree(call("GET","/api/v1/transactions",null,token,null).body()).path("total").asInt());
   assertEquals(409,call("POST","/api/v1/bank-connections/sessions/"+session+"/sync",null,token,null).statusCode());
+ }
+ @Test void recordsExplicitSessionRejectionWithoutBlindRetry() throws Exception {
+  String token="user-"+UUID.randomUUID(),id=create(token,UUID.randomUUID().toString());approve(id);
+  REJECT_CREATES.add(consents.findById(UUID.fromString(id)).orElseThrow().getProviderId());
+  String key=UUID.randomUUID().toString(),local=session(token,id,key);
+  var result=call("GET","/api/v1/bank-connections/sessions/"+local,null,token,null);
+  var body=JSON.readTree(result.body());assertEquals("CREATE_REJECTED",body.path("status").asString());
+  assertEquals("SETU_HTTP_400",body.path("failureCode").asString());
+  assertFalse(result.body().contains("private upstream detail"));
+  int count=SESSION_CALLS.get();assertEquals(local,session(token,id,key));assertEquals(count,SESSION_CALLS.get());
+ }
+ @Test void doesNotImportFailedSessionEvenWithReadyAccountData() throws Exception {
+  String token="user-"+UUID.randomUUID(),id=create(token,UUID.randomUUID().toString());approve(id);
+  FAILED_SESSIONS.add(consents.findById(UUID.fromString(id)).orElseThrow().getProviderId());
+  String local=session(token,id,UUID.randomUUID().toString());
+  var result=call("POST","/api/v1/bank-connections/sessions/"+local+"/sync",null,token,null);
+  assertEquals(200,result.statusCode());assertEquals("FAILED",JSON.readTree(result.body()).path("status").asString());
+  assertEquals(0,JSON.readTree(call("GET","/api/v1/transactions",null,token,null).body()).path("total").asInt());
  }
  @Test void callbacksAreHintsAndReplaySafe() throws Exception {
   String token="user-"+UUID.randomUUID(),id=create(token,UUID.randomUUID().toString());

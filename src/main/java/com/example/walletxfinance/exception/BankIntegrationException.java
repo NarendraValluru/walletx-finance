@@ -3,5 +3,9 @@ import lombok.Getter;
 @Getter
 public class BankIntegrationException extends RuntimeException {
     private final int status;
-    public BankIntegrationException(int status, String message) { super(message); this.status=status; }
+    private final Integer providerStatus;
+    public BankIntegrationException(int status, String message) { this(status,message,null); }
+    public BankIntegrationException(int status, String message, Integer providerStatus) {
+        super(message); this.status=status; this.providerStatus=providerStatus;
+    }
 }

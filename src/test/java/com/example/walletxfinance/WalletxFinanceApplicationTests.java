@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @org.springframework.context.annotation.Import(FinanceSchemaTestSupport.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "walletx.introspection.client-secret=integration-test-service-secret-at-least-32-characters",
+        "walletx.ui.bank-return-url=http://localhost:5173/banks/return",
         "walletx.introspection.read-timeout=1s"})
 class WalletxFinanceApplicationTests {
     private static final String SCHEMA="finance_test_"+java.util.UUID.randomUUID().toString().replace("-","");
@@ -107,6 +108,23 @@ class WalletxFinanceApplicationTests {
         assertEquals(200,get("/api/v1/finance/me","user-token").statusCode());
         assertEquals(200,get("/api/v1/finance/me","user-token").statusCode());
         assertEquals(before+2,REQUESTS.get()); // No cached authorization bypass after logout.
+    }
+
+    @Test void servesSandboxRedirectWithoutExposingFinancialApis() throws Exception {
+        var returned=get("/bank-connection/result?success=true&redirect=https://evil.example&token=untrusted",null);
+        assertEquals(302,returned.statusCode());
+        assertEquals("http://localhost:5173/banks/return",returned.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store",returned.headers().firstValue("Cache-Control").orElseThrow());
+        assertEquals("no-referrer",returned.headers().firstValue("Referrer-Policy").orElseThrow());
+        var page=get("/bank-connection/sandbox?status=APPROVED",null);
+        assertEquals(200,page.statusCode());
+        assertTrue(page.body().contains("WalletX bank connection test"));
+        assertEquals("no-store",page.headers().firstValue("Cache-Control").orElseThrow());
+        assertTrue(page.headers().firstValue("Content-Security-Policy").orElseThrow().contains("connect-src 'self'"));
+        assertEquals(200,get("/bank-connection/sandbox.js",null).statusCode());
+        assertEquals(401,get("/api/v1/transactions",null).statusCode());
+        assertEquals(401,get("/api/v1/bank-connections/consents",null).statusCode());
+        assertTrue(page.headers().firstValue("Set-Cookie").isEmpty());
     }
 
     @Test void rejectsInactiveAndMalformedTokensAndFailsClosedOnAuthOutages() throws Exception {

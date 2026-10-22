@@ -7,5 +7,6 @@ import org.springframework.data.domain.*;
 
 public interface BankAccountRepository extends JpaRepository<BankAccountEntity, UUID> {
     Page<BankAccountEntity> findByOwnerId(UUID ownerId, Pageable page);
+    List<BankAccountEntity> findByOwnerIdAndIdIn(UUID ownerId, Collection<UUID> ids);
 }
 

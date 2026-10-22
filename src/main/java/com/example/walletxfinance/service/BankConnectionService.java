@@ -102,7 +102,10 @@ public class BankConnectionService {
                 session.setNextAttempt(Instant.now());
                 return sessionView(session);
             } catch(BankIntegrationException failure) {
-                session.setStatus("CREATE_UNKNOWN");session.setFailureCode("CREATE_UNKNOWN");
+                Integer code=failure.getProviderStatus();
+                boolean rejected=code!=null && code>=400 && code<500 && code!=408;
+                session.setStatus(rejected?"CREATE_REJECTED":"CREATE_UNKNOWN");
+                session.setFailureCode(code==null?"CREATE_UNKNOWN":"SETU_HTTP_"+code);
                 // Commit uncertain state rather than retrying a provider POST.
                 return sessionView(session);
             }
@@ -151,8 +154,16 @@ public class BankConnectionService {
         return page(accounts.findByOwnerId(owner,paging(page,size)),a -> new AccountView(a.getId(),a.getFipId(),a.getMaskedNumber(),a.getAccountType(),a.getCurrency(),a.getLastSynced()));
     }
     public PageView<TransactionView> transactions(UUID owner,int page,int size) {
-        return page(transactions.findByOwnerIdAndExpiresAtAfter(owner,Instant.now(),PageRequest.of(Math.max(0,page),Math.min(100,Math.max(1,size)),Sort.by("occurredAt").descending())),t ->
-                new TransactionView(t.getId(),t.getAccountId(),t.getProviderTxnId(),t.getAmount(),t.getDirection(),t.getOccurredAt(),t.getNarration(),t.getMode()));
+        var result=transactions.findByOwnerIdAndExpiresAtAfter(owner,Instant.now(),PageRequest.of(Math.max(0,page),Math.min(100,Math.max(1,size)),Sort.by("occurredAt").descending()));
+        var accountIds=result.getContent().stream().map(t -> t.getAccountId()).distinct().toList();
+        // Fetch metadata once per page, scoped to the owner; avoid one lookup per transaction.
+        var metadata=accountIds.isEmpty()?Map.<UUID,com.example.backendutil.finance.BankAccountEntity>of():
+                accounts.findByOwnerIdAndIdIn(owner,accountIds).stream().collect(java.util.stream.Collectors.toMap(a -> a.getId(),a -> a));
+        return page(result,t -> {
+            var account=metadata.get(t.getAccountId());
+            return new TransactionView(t.getId(),t.getAccountId(),t.getProviderTxnId(),t.getAmount(),t.getDirection(),t.getOccurredAt(),t.getNarration(),t.getMode(),
+                    account==null?null:account.getCurrency(),account==null?null:account.getMaskedNumber());
+        });
     }
     private void active(BankConsentEntity c) {
         if(!List.of("ACTIVE","APPROVED").contains(c.getStatus()) || c.getExpiresAt()==null || !c.getExpiresAt().isAfter(Instant.now())) throw error(409,"Consent is not active or has expired");
